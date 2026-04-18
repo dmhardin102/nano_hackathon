@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Nano Emotion Mirror</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #111; color: #eee; margin: 0; padding: 24px; }
+    h1 { margin: 0 0 16px; font-size: 20px; }
+    .row { display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; }
+    .stage { position: relative; width: 640px; height: 480px; background: #000; }
+    video, canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+    .panel { min-width: 260px; }
+    button { font-size: 14px; padding: 8px 14px; margin-right: 8px; cursor: pointer; }
+    .bars { margin-top: 12px; }
+    .bar { display: flex; align-items: center; gap: 8px; margin: 4px 0; font-variant-numeric: tabular-nums; }
+    .bar span { width: 90px; }
+    .bar .track { flex: 1; height: 10px; background: #333; border-radius: 5px; overflow: hidden; }
+    .bar .fill { height: 100%; background: #4caf50; width: 0%; transition: width .15s ease; }
+    .bar.active .fill { background: #ffca28; }
+    #status { margin-top: 12px; font-size: 13px; color: #9cf; white-space: pre-wrap; }
+    #emotion { font-size: 48px; margin: 12px 0; }
+  </style>
+</head>
+<body>
+  <h1>Nano Emotion Mirror</h1>
+  <div class="row">
+    <div class="stage">
+      <video id="video" autoplay muted playsinline></video>
+      <canvas id="overlay"></canvas>
+    </div>
+    <div class="panel">
+      <button id="connect">Connect serial</button>
+      <button id="start" disabled>Start camera</button>
+      <div id="emotion">—</div>
+      <div class="bars" id="bars"></div>
+      <div id="status">idle</div>
+    </div>
+  </div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
