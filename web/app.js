@@ -22,8 +22,9 @@ const ctx = overlay.getContext('2d');
 let drawingUtils = null;
 
 const NPS_FACES = ['😡','😠','😤','😟','😕','😐','😐','🙂','🙂','😀','😁'];
+const NPS_STEPS = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
 const NPS_CELLS = [];
-for (let i = 0; i <= 10; i++) {
+for (let i = 0; i < NPS_STEPS.length; i++) {
   const cell = document.createElement('div');
   cell.className = 'nps-cell';
   const face = document.createElement('div');
@@ -31,14 +32,14 @@ for (let i = 0; i <= 10; i++) {
   face.textContent = NPS_FACES[i];
   const num = document.createElement('div');
   num.className = 'nps-num';
-  num.textContent = i;
+  num.textContent = NPS_STEPS[i];
   cell.appendChild(face);
   cell.appendChild(num);
   npsScaleEl.appendChild(cell);
   NPS_CELLS.push(cell);
 }
 
-const EMOTION_NPS = { happy: 9.5, surprised: 8, neutral: 7, sad: 3, angry: 1 };
+const EMOTION_NPS = { happy: 95, surprised: 80, neutral: 70, sad: 30, angry: 10 };
 const NPS_WINDOW = 90;
 const npsHistory = [];
 let npsAvg = null;
@@ -112,25 +113,27 @@ function updateNPS(scores) {
   if (npsHistory.length > NPS_WINDOW) npsHistory.shift();
 
   npsAvg = npsHistory.reduce((a, b) => a + b, 0) / npsHistory.length;
-  const rounded = Math.round(npsAvg);
-  const clamped = Math.max(0, Math.min(10, rounded));
+  const clamped = Math.max(0, Math.min(100, npsAvg));
 
-  for (let i = 0; i <= 10; i++) {
-    NPS_CELLS[i].classList.toggle('active', i === clamped);
+  let activeIdx = 0;
+  for (let i = NPS_STEPS.length - 1; i >= 0; i--) {
+    if (clamped >= NPS_STEPS[i] - 5) { activeIdx = i; break; }
+  }
+  for (let i = 0; i < NPS_CELLS.length; i++) {
+    NPS_CELLS[i].classList.toggle('active', i === activeIdx);
   }
 
-  const pct = (npsAvg / 10) * 100;
-  npsArrowEl.style.left = Math.max(0, Math.min(100, pct)).toFixed(1) + '%';
+  npsArrowEl.style.left = clamped.toFixed(1) + '%';
 
   let label, cls;
-  if (npsAvg >= 9) { label = 'Promoter'; cls = 'promoter'; }
-  else if (npsAvg >= 7) { label = 'Passive'; cls = 'passive'; }
+  if (clamped >= 90) { label = 'Promoter'; cls = 'promoter'; }
+  else if (clamped >= 70) { label = 'Passive'; cls = 'passive'; }
   else { label = 'Detractor'; cls = 'detractor'; }
 
   npsAvgEl.textContent = '';
   const prefix = document.createTextNode('NPS: ');
   const strong = document.createElement('strong');
-  strong.textContent = npsAvg.toFixed(1);
+  strong.textContent = Math.round(clamped);
   const span = document.createElement('span');
   span.className = `nps-label ${cls}`;
   span.textContent = label;
