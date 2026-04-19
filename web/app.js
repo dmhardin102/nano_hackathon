@@ -1,9 +1,7 @@
-import * as faceapi from 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.15/dist/face-api.esm.js';
-import { PoseLandmarker, FilesetResolver } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.34/vision_bundle.mjs';
+import { FaceLandmarker, FilesetResolver, DrawingUtils } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.34/vision_bundle.mjs';
 
-const FACE_MODELS = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.15/model/';
-const MP_WASM     = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.34/wasm';
-const POSE_MODEL  = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
+const MP_WASM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.34/wasm';
+const FACE_MODEL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 
 const EMOTIONS = ['neutral', 'happy', 'sad', 'angry', 'surprised'];
 const EMOJI = { neutral: '😐', happy: '😀', sad: '😢', angry: '😠', surprised: '😮' };
@@ -12,86 +10,129 @@ const video = document.getElementById('video');
 const overlay = document.getElementById('overlay');
 const statusEl = document.getElementById('status');
 const emotionEl = document.getElementById('emotion');
-const connectBtn = document.getElementById('connect');
-const startBtn = document.getElementById('start');
 const barsEl = document.getElementById('bars');
+const loaderEl = document.getElementById('loader');
+const loaderText = document.getElementById('loaderText');
+const retryBtn = document.getElementById('retryBtn');
+
+const ctx = overlay.getContext('2d');
+let drawingUtils = null;
 
 const bars = {};
 for (const e of EMOTIONS) {
   const row = document.createElement('div');
   row.className = 'bar';
   row.dataset.emotion = e;
-  row.innerHTML = `<span>${e}</span><div class="track"><div class="fill"></div></div>`;
+  const label = document.createElement('span');
+  label.textContent = e;
+  const track = document.createElement('div');
+  track.className = 'track';
+  const fill = document.createElement('div');
+  fill.className = 'fill';
+  track.appendChild(fill);
+  row.appendChild(label);
+  row.appendChild(track);
   barsEl.appendChild(row);
   bars[e] = row;
 }
-const armsRow = document.createElement('div');
-armsRow.id = 'armsRow';
-armsRow.style.marginTop = '10px';
-armsRow.style.fontSize = '16px';
-armsRow.textContent = 'arms: —';
-barsEl.appendChild(armsRow);
 
-let port = null, writer = null;
-let lastSent = null, lastSendAt = 0;
-let poseLandmarker = null;
+let faceLandmarker = null;
 let mediaStream = null;
 let running = false;
-let modelsLoaded = false;
 
 const setStatus = (m) => { statusEl.textContent = m; };
 
-async function connectSerial() {
-  if (!('serial' in navigator)) {
-    setStatus('Web Serial not supported. Use Chrome/Edge on localhost.');
-    return;
+const bs_val = (bs, key) => bs[key] || 0;
+
+function scoreEmotions(bs) {
+  const happy = (bs_val(bs, 'mouthSmileLeft') + bs_val(bs, 'mouthSmileRight')) / 2
+    + (bs_val(bs, 'cheekSquintLeft') + bs_val(bs, 'cheekSquintRight')) * 0.15;
+  const sad = (bs_val(bs, 'mouthFrownLeft') + bs_val(bs, 'mouthFrownRight')) / 2
+    + bs_val(bs, 'browInnerUp') * 0.3;
+  const angry = (bs_val(bs, 'browDownLeft') + bs_val(bs, 'browDownRight')) / 2
+    + (bs_val(bs, 'noseSneerLeft') + bs_val(bs, 'noseSneerRight')) * 0.15;
+  const angryGated = (bs_val(bs, 'browDownLeft') > 0.4 && bs_val(bs, 'browDownRight') > 0.4) ? angry : angry * 0.25;
+  const surprised = (bs_val(bs, 'eyeWideLeft') + bs_val(bs, 'eyeWideRight')) / 2
+    + bs_val(bs, 'jawOpen') * 0.3
+    + (bs_val(bs, 'browOuterUpLeft') + bs_val(bs, 'browOuterUpRight')) * 0.15;
+
+  const scores = { happy, sad, angry: angryGated, surprised };
+  const max = Math.max(...Object.values(scores));
+  const threshold = 0.25;
+
+  let best = 'neutral';
+  let bestV = 0;
+  if (max > threshold) {
+    for (const k of Object.keys(scores)) {
+      if (scores[k] > bestV) { bestV = scores[k]; best = k; }
+    }
   }
-  try {
-    port = await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x2341 }] });
-    await port.open({ baudRate: 115200 });
-    const enc = new TextEncoderStream();
-    enc.readable.pipeTo(port.writable);
-    writer = enc.writable.getWriter();
-    setStatus('serial connected');
-    startBtn.disabled = false;
-  } catch (err) {
-    setStatus('serial error: ' + err.message);
-  }
+  scores.neutral = max <= threshold ? 1 : Math.max(0, 1 - max);
+
+  return { scores, best };
 }
 
-async function sendState(emotion, arms) {
-  if (!writer) return;
-  const payload = `${emotion},${arms}`;
-  const now = performance.now();
-  if (payload === lastSent && now - lastSendAt < 1000) return;
-  lastSent = payload;
-  lastSendAt = now;
-  try { await writer.write(payload + '\n'); }
-  catch (err) { setStatus('write error: ' + err.message); }
+function showLoader(msg) { loaderText.textContent = msg; loaderEl.classList.add('visible'); }
+function hideLoader() { loaderEl.classList.remove('visible'); }
+
+function showCameraError(msg) {
+  hideLoader();
+  setStatus(msg);
+  retryBtn.style.display = 'inline-block';
+  emotionEl.textContent = '🚫';
 }
 
 async function loadModels() {
-  setStatus('loading face models…');
-  await faceapi.nets.tinyFaceDetector.loadFromUri(FACE_MODELS);
-  await faceapi.nets.faceExpressionNet.loadFromUri(FACE_MODELS);
-  setStatus('loading pose model…');
+  showLoader('Loading face model…');
+  setStatus('loading face model…');
   const vision = await FilesetResolver.forVisionTasks(MP_WASM);
-  poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
-    baseOptions: { modelAssetPath: POSE_MODEL, delegate: 'GPU' },
+  faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+    baseOptions: { modelAssetPath: FACE_MODEL, delegate: 'GPU' },
+    outputFaceBlendshapes: true,
     runningMode: 'VIDEO',
-    numPoses: 1,
+    numFaces: 1,
   });
-  setStatus('models loaded');
+  setStatus('model loaded');
+  showLoader('Starting camera…');
 }
 
 async function startCamera() {
-  mediaStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+  retryBtn.style.display = 'none';
+  showLoader('Starting camera…');
+
+  if (navigator.permissions) {
+    try {
+      const perm = await navigator.permissions.query({ name: 'camera' });
+      if (perm.state === 'denied') {
+        showCameraError('Camera permission is blocked. Click the camera or lock icon in your address bar, allow camera access, then try again.');
+        return;
+      }
+    } catch (_) { /* permissions API not supported for camera, fall through */ }
+  }
+
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' }
+    });
+  } catch (err) {
+    if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+      showCameraError('Camera permission denied. Click the camera or lock icon in your address bar to allow access, then try again.');
+    } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+      showCameraError('No camera found. Please connect a camera and try again.');
+    } else {
+      showCameraError(`Camera error: ${err.message}`);
+    }
+    return;
+  }
+
   video.srcObject = mediaStream;
   await new Promise(r => (video.onloadedmetadata = r));
   overlay.width = video.videoWidth;
   overlay.height = video.videoHeight;
+  drawingUtils = new DrawingUtils(ctx);
   running = true;
-  setStatus('camera running');
+  hideLoader();
+  setStatus('');
   detectLoop();
 }
 
@@ -102,10 +143,8 @@ function stopCamera() {
     mediaStream = null;
   }
   video.srcObject = null;
-  const ctx = overlay.getContext('2d');
   ctx.clearRect(0, 0, overlay.width, overlay.height);
   emotionEl.textContent = '—';
-  armsRow.textContent = 'arms: —';
   for (const e of EMOTIONS) {
     bars[e].querySelector('.fill').style.width = '0%';
     bars[e].classList.remove('active');
@@ -113,123 +152,73 @@ function stopCamera() {
   setStatus('camera off');
 }
 
-function mapExpressions(expr) {
-  const out = {
-    neutral: expr.neutral,
-    happy: expr.happy,
-    sad: expr.sad,
-    angry: expr.angry + expr.disgusted,
-    surprised: expr.surprised + expr.fearful,
-  };
-  let best = 'neutral', bestV = -1;
-  for (const k of EMOTIONS) if (out[k] > bestV) { bestV = out[k]; best = k; }
-  return { scores: out, best, confidence: bestV };
-}
+let lastVideoTime = -1;
 
-// MediaPipe Pose indices: 11 L-shoulder, 12 R-shoulder, 15 L-wrist, 16 R-wrist.
-// "left" is the subject's own left, i.e. camera-right when user faces the camera.
-function detectArmsCrossed(landmarks) {
-  if (!landmarks) return { crossed: false, confidence: 0 };
-  const Ls = landmarks[11], Rs = landmarks[12], Lw = landmarks[15], Rw = landmarks[16];
-  const minVis = Math.min(Ls?.visibility ?? 0, Rs?.visibility ?? 0, Lw?.visibility ?? 0, Rw?.visibility ?? 0);
-  if (minVis < 0.5) return { crossed: false, confidence: 0 };
-  const midX = (Ls.x + Rs.x) / 2;
-  const shoulderWidth = Math.abs(Ls.x - Rs.x);
-  // Wrists must cross the midline toward the opposite shoulder.
-  const leftWristCrossed = Lw.x < midX;          // subject's left wrist is on the right half of frame; crossed means it's now on the left half
-  const rightWristCrossed = Rw.x > midX;
-  // Also require wrists to be close together horizontally (torso-width, not flung out)
-  const wristGap = Math.abs(Lw.x - Rw.x);
-  const crossed = leftWristCrossed && rightWristCrossed && wristGap < shoulderWidth * 1.2;
-  return { crossed, confidence: minVis };
-}
+function detectLoop() {
+  if (!running) return;
 
-function drawPose(ctx, landmarks) {
-  if (!landmarks) return;
-  const edges = [[11,13],[13,15],[12,14],[14,16],[11,12]];
-  ctx.strokeStyle = '#ffca28';
-  ctx.lineWidth = 2;
-  for (const [a, b] of edges) {
-    const A = landmarks[a], B = landmarks[b];
-    if (!A || !B) continue;
-    ctx.beginPath();
-    ctx.moveTo(A.x * overlay.width, A.y * overlay.height);
-    ctx.lineTo(B.x * overlay.width, B.y * overlay.height);
-    ctx.stroke();
-  }
-}
+  const nowMs = Date.now();
 
-const faceOpts = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 });
-
-async function detectLoop() {
-  const ctx = overlay.getContext('2d');
-  let stableEmotion = 'neutral', stableArms = 'open';
-  let pendingEmotion = 'neutral', pendingArms = 'open';
-  let pendingSince = 0;
-
-  while (running) {
-    const ts = performance.now();
-    const [faceResult, poseResult] = await Promise.all([
-      faceapi.detectSingleFace(video, faceOpts).withFaceExpressions(),
-      Promise.resolve(poseLandmarker?.detectForVideo(video, ts)),
-    ]);
+  if (video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    const result = faceLandmarker.detectForVideo(video, nowMs);
 
     ctx.clearRect(0, 0, overlay.width, overlay.height);
 
-    let emotion = stableEmotion, emoConf = 0;
-    if (faceResult) {
-      const { box } = faceResult.detection;
-      ctx.strokeStyle = '#4caf50'; ctx.lineWidth = 2;
-      ctx.strokeRect(box.x, box.y, box.width, box.height);
-      const m = mapExpressions(faceResult.expressions);
-      emotion = m.best; emoConf = m.confidence;
+    if (result.faceLandmarks && result.faceLandmarks.length > 0) {
+      drawingUtils.drawConnectors(
+        result.faceLandmarks[0],
+        FaceLandmarker.FACE_LANDMARKS_TESSELATION,
+        { color: '#4caf5040', lineWidth: 0.5 }
+      );
+      drawingUtils.drawConnectors(
+        result.faceLandmarks[0],
+        FaceLandmarker.FACE_LANDMARKS_FACE_OVAL,
+        { color: '#4caf50', lineWidth: 1.5 }
+      );
+    }
+
+    if (result.faceBlendshapes && result.faceBlendshapes.length > 0) {
+      const bs = {};
+      for (const cat of result.faceBlendshapes[0].categories) {
+        bs[cat.categoryName] = cat.score;
+      }
+      const m = scoreEmotions(bs);
+      emotionEl.textContent = `${EMOJI[m.best]} ${m.best}`;
       for (const e of EMOTIONS) {
-        bars[e].querySelector('.fill').style.width = (Math.max(0, Math.min(1, m.scores[e])) * 100).toFixed(0) + '%';
+        const val = Math.max(0, Math.min(1, m.scores[e] || 0));
+        bars[e].querySelector('.fill').style.width = (val * 100).toFixed(0) + '%';
         bars[e].classList.toggle('active', e === m.best);
       }
-    }
-
-    let armsState = stableArms, armsConf = 0;
-    const lm = poseResult?.landmarks?.[0];
-    if (lm) {
-      drawPose(ctx, lm);
-      const r = detectArmsCrossed(lm);
-      armsState = r.crossed ? 'crossed' : 'open';
-      armsConf = r.confidence;
-    }
-
-    emotionEl.textContent = faceResult ? `${EMOJI[emotion]} ${emotion}` : '— no face —';
-    armsRow.textContent = `arms: ${armsState}${lm ? '' : ' (no pose)'}`;
-
-    // Debounce: both must hold steady briefly before sending.
-    if (emotion === pendingEmotion && armsState === pendingArms) {
-      if (ts - pendingSince > 400 && emoConf > 0.5) {
-        if (emotion !== stableEmotion || armsState !== stableArms) {
-          stableEmotion = emotion; stableArms = armsState;
-          sendState(stableEmotion, stableArms);
-        }
-      }
     } else {
-      pendingEmotion = emotion; pendingArms = armsState; pendingSince = ts;
+      emotionEl.textContent = '👀';
+      for (const e of EMOTIONS) {
+        bars[e].querySelector('.fill').style.width = '0%';
+        bars[e].classList.remove('active');
+      }
     }
-
-    await new Promise(r => requestAnimationFrame(r));
   }
+
+  requestAnimationFrame(detectLoop);
 }
 
-connectBtn.addEventListener('click', connectSerial);
-startBtn.addEventListener('click', async () => {
-  if (running) {
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && running) {
     stopCamera();
-    startBtn.textContent = 'Start camera';
-    return;
-  }
-  startBtn.disabled = true;
-  try {
-    if (!modelsLoaded) { await loadModels(); modelsLoaded = true; }
-    await startCamera();
-    startBtn.textContent = 'Stop camera';
-  } finally {
-    startBtn.disabled = false;
   }
 });
+
+retryBtn.addEventListener('click', () => {
+  startCamera();
+});
+
+(async () => {
+  try {
+    await loadModels();
+    await startCamera();
+  } catch (err) {
+    hideLoader();
+    setStatus(`Failed to initialize: ${err.message}`);
+    emotionEl.textContent = '❌';
+  }
+})();
