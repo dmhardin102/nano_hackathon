@@ -14,9 +14,34 @@ const barsEl = document.getElementById('bars');
 const loaderEl = document.getElementById('loader');
 const loaderText = document.getElementById('loaderText');
 const retryBtn = document.getElementById('retryBtn');
+const npsScaleEl = document.getElementById('npsScale');
+const npsArrowEl = document.getElementById('npsArrow');
+const npsAvgEl = document.getElementById('npsAvg');
 
 const ctx = overlay.getContext('2d');
 let drawingUtils = null;
+
+const NPS_FACES = ['😡','😠','😤','😟','😕','😐','😐','🙂','🙂','😀','😁'];
+const NPS_CELLS = [];
+for (let i = 0; i <= 10; i++) {
+  const cell = document.createElement('div');
+  cell.className = 'nps-cell';
+  const face = document.createElement('div');
+  face.className = 'nps-face';
+  face.textContent = NPS_FACES[i];
+  const num = document.createElement('div');
+  num.className = 'nps-num';
+  num.textContent = i;
+  cell.appendChild(face);
+  cell.appendChild(num);
+  npsScaleEl.appendChild(cell);
+  NPS_CELLS.push(cell);
+}
+
+const EMOTION_NPS = { happy: 9.5, surprised: 8, neutral: 7, sad: 3, angry: 1 };
+const NPS_WINDOW = 90;
+const npsHistory = [];
+let npsAvg = null;
 
 const bars = {};
 for (const e of EMOTIONS) {
@@ -70,6 +95,46 @@ function scoreEmotions(bs) {
   scores.neutral = max <= threshold ? 1 : Math.max(0, 1 - max);
 
   return { scores, best };
+}
+
+function updateNPS(scores) {
+  let npsRaw = 0;
+  let total = 0;
+  for (const [emo, weight] of Object.entries(scores)) {
+    if (EMOTION_NPS[emo] !== undefined) {
+      npsRaw += EMOTION_NPS[emo] * weight;
+      total += weight;
+    }
+  }
+  if (total > 0) npsRaw /= total;
+
+  npsHistory.push(npsRaw);
+  if (npsHistory.length > NPS_WINDOW) npsHistory.shift();
+
+  npsAvg = npsHistory.reduce((a, b) => a + b, 0) / npsHistory.length;
+  const rounded = Math.round(npsAvg);
+  const clamped = Math.max(0, Math.min(10, rounded));
+
+  for (let i = 0; i <= 10; i++) {
+    NPS_CELLS[i].classList.toggle('active', i === clamped);
+  }
+
+  const pct = (npsAvg / 10) * 100;
+  npsArrowEl.style.left = Math.max(0, Math.min(100, pct)).toFixed(1) + '%';
+
+  let label, cls;
+  if (npsAvg >= 9) { label = 'Promoter'; cls = 'promoter'; }
+  else if (npsAvg >= 7) { label = 'Passive'; cls = 'passive'; }
+  else { label = 'Detractor'; cls = 'detractor'; }
+
+  npsAvgEl.textContent = '';
+  const prefix = document.createTextNode('NPS: ');
+  const strong = document.createElement('strong');
+  strong.textContent = npsAvg.toFixed(1);
+  const span = document.createElement('span');
+  span.className = `nps-label ${cls}`;
+  span.textContent = label;
+  npsAvgEl.append(prefix, strong, ' ', span);
 }
 
 function showLoader(msg) { loaderText.textContent = msg; loaderEl.classList.add('visible'); }
@@ -190,6 +255,7 @@ function detectLoop() {
         bars[e].querySelector('.fill').style.width = (val * 100).toFixed(0) + '%';
         bars[e].classList.toggle('active', e === m.best);
       }
+      updateNPS(m.scores);
     } else {
       emotionEl.textContent = '👀';
       for (const e of EMOTIONS) {
