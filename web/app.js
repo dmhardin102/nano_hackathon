@@ -39,9 +39,13 @@ for (let i = 0; i < NPS_STEPS.length; i++) {
   NPS_CELLS.push(cell);
 }
 
-const EMOTION_NPS = { happy: 95, surprised: 80, neutral: 70, sad: 30, angry: 10 };
+const EMOTION_NPS = { happy: 100, surprised: 85, neutral: 84, sad: 30, angry: 10 };
+const HAPPY_WEIGHT_BOOST = 2.6;
 const NPS_WINDOW = 90;
+const HAPPY_STREAK_MIN = 0.35;
+const HAPPY_STREAK_PULL = 0.85;
 const npsHistory = [];
+const happyHistory = [];
 let npsAvg = null;
 
 const bars = {};
@@ -98,13 +102,14 @@ function scoreEmotions(bs) {
   return { scores, best };
 }
 
-function updateNPS(scores) {
+function updateNPS(scores, best) {
   let npsRaw = 0;
   let total = 0;
   for (const [emo, weight] of Object.entries(scores)) {
     if (EMOTION_NPS[emo] !== undefined) {
-      npsRaw += EMOTION_NPS[emo] * weight;
-      total += weight;
+      const w = emo === 'happy' ? weight * HAPPY_WEIGHT_BOOST : weight;
+      npsRaw += EMOTION_NPS[emo] * w;
+      total += w;
     }
   }
   if (total > 0) npsRaw /= total;
@@ -112,8 +117,18 @@ function updateNPS(scores) {
   npsHistory.push(npsRaw);
   if (npsHistory.length > NPS_WINDOW) npsHistory.shift();
 
+  happyHistory.push(best === 'happy' ? 1 : 0);
+  if (happyHistory.length > NPS_WINDOW) happyHistory.shift();
+
   npsAvg = npsHistory.reduce((a, b) => a + b, 0) / npsHistory.length;
-  const clamped = Math.max(0, Math.min(100, npsAvg));
+
+  const happyFrac = happyHistory.reduce((a, b) => a + b, 0) / happyHistory.length;
+  let boosted = npsAvg;
+  if (happyFrac > HAPPY_STREAK_MIN) {
+    const streak = (happyFrac - HAPPY_STREAK_MIN) / (1 - HAPPY_STREAK_MIN);
+    boosted = npsAvg + (100 - npsAvg) * streak * HAPPY_STREAK_PULL;
+  }
+  const clamped = Math.max(0, Math.min(100, boosted));
 
   let activeIdx = 0;
   for (let i = NPS_STEPS.length - 1; i >= 0; i--) {
@@ -126,8 +141,8 @@ function updateNPS(scores) {
   npsArrowEl.style.left = clamped.toFixed(1) + '%';
 
   let label, cls;
-  if (clamped >= 90) { label = 'Promoter'; cls = 'promoter'; }
-  else if (clamped >= 70) { label = 'Passive'; cls = 'passive'; }
+  if (clamped >= 85) { label = 'Promoter'; cls = 'promoter'; }
+  else if (clamped >= 65) { label = 'Passive'; cls = 'passive'; }
   else { label = 'Detractor'; cls = 'detractor'; }
 
   npsAvgEl.textContent = '';
@@ -258,7 +273,7 @@ function detectLoop() {
         bars[e].querySelector('.fill').style.width = (val * 100).toFixed(0) + '%';
         bars[e].classList.toggle('active', e === m.best);
       }
-      updateNPS(m.scores);
+      updateNPS(m.scores, m.best);
     } else {
       emotionEl.textContent = '👀';
       for (const e of EMOTIONS) {
